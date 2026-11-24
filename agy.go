@@ -1022,7 +1022,7 @@ func executeNonStream(req rpcExecutorRequest) (executorResponse, error) {
 	run.session.NativeID = nonEmpty(result.ConversationID, run.session.NativeID)
 	result.ConversationID = run.session.clientID()
 
-	payload, err := makeChatCompletion(req.Model, result)
+	payload, err := makeChatCompletion(req.Model, declaredToolNames(req.Payload), result)
 	if err != nil {
 		return executorResponse{}, err
 	}
@@ -1243,6 +1243,7 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 	}
 
 	toolCalls, isToolCall := extractToolCalls(fullResponse)
+	toolCalls = normalizeToolCalls(toolCalls, declaredToolNames(req.Payload))
 	if !isToolCall && strings.TrimSpace(fullResponse) == "" {
 		// agy finished without text: it burned the turn on its own built-in tools.
 		// Failing here lets the client walk its fallback chain instead of retrying

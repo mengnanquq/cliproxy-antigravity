@@ -172,6 +172,22 @@ func writeToolInstruction(b *strings.Builder, tools []json.RawMessage) {
 		b.Write(tool)
 		b.WriteByte('\n')
 	}
+	var names []string
+	for _, tool := range tools {
+		var parsed struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		if err := json.Unmarshal(tool, &parsed); err == nil && strings.TrimSpace(parsed.Function.Name) != "" {
+			names = append(names, parsed.Function.Name)
+		}
+	}
+	if len(names) > 0 {
+		b.WriteString("\nCall tools by these exact names (case-sensitive), never a paraphrase such as \"Agent\" for \"subagent\": ")
+		b.WriteString(strings.Join(names, ", "))
+		b.WriteString("\n")
+	}
 	b.WriteString("\nIf a client tool call is needed, reply ONLY with a JSON block in this exact markdown code fence:\n")
 	b.WriteString("```tool_calls\n[\n  {\n    \"name\": \"tool_name\",\n    \"arguments\": { ... }\n  }\n]\n```\n")
 	b.WriteString("If no tool call is needed, provide your regular assistant response without the ```tool_calls code block.\n")
@@ -407,6 +423,73 @@ func fencedToolCallJSON(text string) string {
 	return ""
 }
 
+// declaredToolNames lists the tool names the client advertised.
+func declaredToolNames(payload []byte) []string {
+	var req struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(req.Tools))
+	for _, raw := range req.Tools {
+		var tool struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		if err := json.Unmarshal(raw, &tool); err == nil && strings.TrimSpace(tool.Function.Name) != "" {
+			names = append(names, tool.Function.Name)
+		}
+	}
+	return names
+}
+
+// resolveToolName snaps a model-emitted name onto one of the advertised tools.
+// Models routinely call "Agent" for an advertised "subagent", or change case,
+// and an unknown name makes the client drop the whole call.
+func resolveToolName(name string, declared []string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" || len(declared) == 0 {
+		return trimmed
+	}
+	for _, candidate := range declared {
+		if candidate == trimmed {
+			return candidate
+		}
+	}
+	lowered := strings.ToLower(trimmed)
+	for _, candidate := range declared {
+		if strings.ToLower(candidate) == lowered {
+			return candidate
+		}
+	}
+	matched := ""
+	for _, candidate := range declared {
+		lowerCandidate := strings.ToLower(candidate)
+		if strings.HasSuffix(lowerCandidate, lowered) || strings.HasSuffix(lowered, lowerCandidate) {
+			if matched != "" && matched != candidate {
+				return trimmed // ambiguous, leave it alone
+			}
+			matched = candidate
+		}
+	}
+	if matched != "" {
+		return matched
+	}
+	return trimmed
+}
+
+func normalizeToolCalls(calls []openAIToolCall, declared []string) []openAIToolCall {
+	if len(declared) == 0 {
+		return calls
+	}
+	for i := range calls {
+		calls[i].Function.Name = resolveToolName(calls[i].Function.Name, declared)
+	}
+	return calls
+}
+
 func extractToolCalls(response string) ([]openAIToolCall, bool) {
 	trimmed := strings.TrimSpace(response)
 	jsonBlock := fencedToolCallJSON(trimmed)
@@ -495,9 +578,10 @@ func estimateTokens(text string) int {
 	return (n + 3) / 4
 }
 
-func makeChatCompletion(requestedModel string, result agyResult) ([]byte, error) {
+func makeChatCompletion(requestedModel string, declared []string, result agyResult) ([]byte, error) {
 	model := displayModel(requestedModel)
 	toolCalls, isToolCall := extractToolCalls(result.Response)
+	toolCalls = normalizeToolCalls(toolCalls, declared)
 	if !isToolCall && strings.TrimSpace(result.Response) == "" {
 		return nil, emptyResponseError()
 	}

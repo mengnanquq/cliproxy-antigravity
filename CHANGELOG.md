@@ -4,6 +4,13 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-25
+
+### Fixed
+
+- Model-emitted tool names are snapped onto the advertised tools. Models call `Agent` for an advertised `subagent`, or change case, and clients drop a call whose name they do not know — subagent hand-offs silently turned into plain text. Names now match exactly, case-insensitively, or by an unambiguous suffix.
+- The tool instruction lists the exact advertised names and forbids paraphrases.
+
 ## [0.4.3] - 2026-11-25
 
 ### Fixed

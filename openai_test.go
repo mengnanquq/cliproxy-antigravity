@@ -135,7 +135,7 @@ func TestExtractToolCalls(t *testing.T) {
 
 func TestMakeChatCompletionRejectsEmptyResponse(t *testing.T) {
 	for _, response := range []string{"", "   \n\t "} {
-		_, err := makeChatCompletion("agy/gemini-4-argon-high", agyResult{
+		_, err := makeChatCompletion("agy/gemini-4-argon-high", nil, agyResult{
 			Status:   "SUCCESS",
 			Response: response,
 		})
@@ -153,7 +153,7 @@ func TestMakeChatCompletionRejectsEmptyResponse(t *testing.T) {
 }
 
 func TestMakeChatCompletionMapsToolCalls(t *testing.T) {
-	raw, err := makeChatCompletion("gemini-3.8-flash-high", agyResult{
+	raw, err := makeChatCompletion("gemini-3.8-flash-high", nil, agyResult{
 		Status:   "SUCCESS",
 		Response: "```tool_calls\n[{\"name\":\"search\",\"arguments\":{\"query\":\"golang\"}}]\n```",
 	})
@@ -180,7 +180,7 @@ func TestMakeChatCompletionMapsToolCalls(t *testing.T) {
 }
 
 func TestMakeChatCompletionMapsUsageAndConversation(t *testing.T) {
-	raw, err := makeChatCompletion("agy/test", agyResult{
+	raw, err := makeChatCompletion("agy/test", nil, agyResult{
 		ConversationID: "conv-xyz-99",
 		Status:         "SUCCESS",
 		Response:       "done",
@@ -306,5 +306,59 @@ func TestExtractToolCallsPlainStillWorks(t *testing.T) {
 	calls, ok := extractToolCalls("```tool_calls\n[{\"name\":\"bash\",\"arguments\":{\"command\":\"ls\"}}]\n```")
 	if !ok || len(calls) != 1 || calls[0].Function.Name != "bash" {
 		t.Fatalf("plain fenced call regressed: ok=%v calls=%v", ok, calls)
+	}
+}
+
+func TestResolveToolNameSnapsModelAliases(t *testing.T) {
+	declared := []string{"read", "bash", "subagent", "codemode"}
+	cases := map[string]string{
+		"subagent": "subagent",
+		"AGENT":    "subagent", // model uses the human name for the tool
+		"Bash":     "bash",
+		"Codemode": "codemode",
+		"write":    "write", // unknown stays untouched
+	}
+	for input, want := range cases {
+		if got := resolveToolName(input, declared); got != want {
+			t.Fatalf("resolveToolName(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestNormalizeToolCallsRewritesUnknownAlias(t *testing.T) {
+	raw, err := makeChatCompletion("agy/test", []string{"read", "subagent"}, agyResult{
+		Status:   "SUCCESS",
+		Response: "```tool_calls\n[{\"name\":\"Agent\",\"arguments\":{\"agent\":\"scout\",\"task\":\"look\"}}]\n```",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []openAIToolCall `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Choices) == 0 || len(payload.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("no tool call in payload: %s", raw)
+	}
+	if got := payload.Choices[0].Message.ToolCalls[0].Function.Name; got != "subagent" {
+		t.Fatalf("tool name = %q, want subagent", got)
+	}
+}
+
+func TestToolInstructionListsExactNames(t *testing.T) {
+	payload := []byte(`{"model":"agy/default","messages":[{"role":"user","content":"hi"}],
+      "tools":[{"type":"function","function":{"name":"subagent","description":"delegate"}}]}`)
+	prompt, err := testChatPrompt(t, payload, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "never a paraphrase") || !strings.Contains(prompt, "subagent") {
+		t.Fatalf("tool instruction does not pin exact names:\n%s", prompt[:400])
 	}
 }
