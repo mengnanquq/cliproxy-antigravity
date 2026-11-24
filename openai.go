@@ -329,24 +329,92 @@ func messageContentText(raw json.RawMessage, workdir string) (string, error) {
 	return strings.Join(parts, "\n"), nil
 }
 
+// jsonValueEnd returns the index just past the JSON object or array that starts
+// at start, honouring strings and escapes. Tool arguments often embed markdown
+// fences or braces, so the first "```" after the opening fence is not a safe
+// terminator.
+func jsonValueEnd(s string, start int) int {
+	if start < 0 || start >= len(s) {
+		return -1
+	}
+	var open, close byte
+	switch s[start] {
+	case '{':
+		open, close = '{', '}'
+	case '[':
+		open, close = '[', ']'
+	default:
+		return -1
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		}
+	}
+	return -1
+}
+
+// fencedToolCallJSON pulls the JSON payload out of a fenced tool_calls block.
+// Candidates are tried from most to least permissive so embedded ``` fences
+// inside string arguments do not truncate the payload.
+func fencedToolCallJSON(text string) string {
+	start := -1
+	for _, opener := range []string{"```tool_calls", "```json"} {
+		if idx := strings.Index(text, opener); idx >= 0 {
+			start = idx + len(opener)
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	body := text[start:]
+	if brace := strings.IndexAny(body, "[{"); brace >= 0 {
+		if end := jsonValueEnd(body, brace); end > 0 {
+			if candidate := strings.TrimSpace(body[brace:end]); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	// Fall back to the last closing fence, which is correct when the arguments
+	// contain no balanced JSON the scanner could follow.
+	if endIdx := strings.LastIndex(body, "```"); endIdx >= 0 {
+		return strings.TrimSpace(body[:endIdx])
+	}
+	return ""
+}
+
 func extractToolCalls(response string) ([]openAIToolCall, bool) {
 	trimmed := strings.TrimSpace(response)
-	jsonBlock := ""
+	jsonBlock := fencedToolCallJSON(trimmed)
 
-	// Check for ```tool_calls ... ```
-	const fenceStart = "```tool_calls"
-	if idx := strings.Index(trimmed, fenceStart); idx >= 0 {
-		rest := trimmed[idx+len(fenceStart):]
-		if endIdx := strings.Index(rest, "```"); endIdx >= 0 {
-			jsonBlock = strings.TrimSpace(rest[:endIdx])
+	if jsonBlock == "" {
+		if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
+			jsonBlock = trimmed
 		}
-	} else if strings.HasPrefix(trimmed, "```json") {
-		rest := trimmed[7:]
-		if endIdx := strings.Index(rest, "```"); endIdx >= 0 {
-			jsonBlock = strings.TrimSpace(rest[:endIdx])
-		}
-	} else if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
-		jsonBlock = trimmed
 	}
 
 	if jsonBlock == "" {

@@ -278,3 +278,33 @@ func TestPromptBudgetDefault(t *testing.T) {
 		t.Fatalf("promptBudgetBytes(override) = %d, want 32768", got)
 	}
 }
+
+// Models embed markdown fences inside string arguments, which used to cut the
+// fenced tool_calls payload at the first inner fence and degrade it to text.
+func TestExtractToolCallsWithEmbeddedFences(t *testing.T) {
+	response := "```tool_calls\n[\n  {\n    \"name\": \"Agent\",\n    \"arguments\": {\n" +
+		"      \"subagent_type\": \"worker\",\n" +
+		"      \"prompt\": \"Please do this:\\n```bash\\nmake test\\n```\\nAnd also ```json\\n{\\\"a\\\":1}\\n```\\nthanks\"\n" +
+		"    }\n  }\n]\n```"
+	calls, ok := extractToolCalls(response)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("expected one recovered tool call, got ok=%v len=%d", ok, len(calls))
+	}
+	if calls[0].Function.Name != "Agent" {
+		t.Fatalf("name = %q, want Agent", calls[0].Function.Name)
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &args); err != nil {
+		t.Fatalf("arguments are not valid JSON: %v (%s)", err, calls[0].Function.Arguments)
+	}
+	if args["subagent_type"] != "worker" {
+		t.Fatalf("subagent_type = %v, want worker", args["subagent_type"])
+	}
+}
+
+func TestExtractToolCallsPlainStillWorks(t *testing.T) {
+	calls, ok := extractToolCalls("```tool_calls\n[{\"name\":\"bash\",\"arguments\":{\"command\":\"ls\"}}]\n```")
+	if !ok || len(calls) != 1 || calls[0].Function.Name != "bash" {
+		t.Fatalf("plain fenced call regressed: ok=%v calls=%v", ok, calls)
+	}
+}

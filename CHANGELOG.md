@@ -4,6 +4,12 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-25
+
+### Fixed
+
+- Client tool calls are no longer lost when their arguments contain markdown fences. The fenced `tool_calls` payload was cut at the first inner ``` and failed to parse, so calls with code blocks inside `prompt` (subagent hand-offs, long file edits) degraded into plain assistant text. The payload is now located by scanning for the balanced JSON value, with the closing fence as fallback.
+
 ## [0.4.2] - 2026-11-25
 
 ### Changed
