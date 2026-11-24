@@ -11,7 +11,7 @@ import (
 const (
 	pluginID      = "cliproxy-antigravity"
 	providerID    = "agy"
-	pluginVersion = "0.4.0"
+	pluginVersion = "0.4.2"
 	schemaVersion = 6
 )
 
@@ -481,8 +481,8 @@ func pluginRegistration() registration {
 		Metadata: metadata{
 			Name:             "CLIProxy Antigravity",
 			Version:          pluginVersion,
-			Author:           "adeebahmad01 and contributors",
-			GitHubRepository: "https://github.com/adeebahmad01/cliproxy-antigravity",
+			Author:           "mengnanquq and contributors (fork of adeebahmad01)",
+			GitHubRepository: "https://github.com/mengnanquq/cliproxy-antigravity",
 			ConfigFields: []configField{
 				{Name: "binary_path", Type: "string", Default: defaults.BinaryPath, Description: "Path or command name for the official Antigravity CLI (default: agy)."},
 				{Name: "workdir", Type: "string", Default: defaults.Workdir, Description: "Working directory used when agy executes requests."},

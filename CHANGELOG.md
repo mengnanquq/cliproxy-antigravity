@@ -4,6 +4,12 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-25
+
+### Changed
+
+- Plugin metadata now reports version `0.4.2`, the fork maintainer, and the fork repository, so the management panel stops showing the upstream `0.4.0` / `adeebahmad01` registration.
+
 ## [0.4.1] - 2026-11-25
 
 ### Fixed
