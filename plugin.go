@@ -488,6 +488,7 @@ func pluginRegistration() registration {
 				{Name: "workdir", Type: "string", Default: defaults.Workdir, Description: "Working directory used when agy executes requests."},
 				{Name: "print_timeout", Type: "string", Default: defaults.PrintTimeout, Description: "Antigravity print timeout, using Go/CLI duration syntax (default: 30m)."},
 				{Name: "dangerously_skip_permissions", Type: "boolean", Default: defaults.DangerouslySkipPermissions, Description: "Pass --dangerously-skip-permissions to agy. Disabled by default."},
+				{Name: "max_prompt_bytes", Type: "integer", Default: defaults.MaxPromptBytes, Description: "Largest prompt sent inline on agy stdin (default 180224). Larger requests are written to a file in workdir and handed to agy to read in full, so the conversation is never truncated."},
 				{Name: "sandbox", Type: "boolean", Default: defaults.Sandbox, Description: "Pass --sandbox to agy when supported by the installed CLI."},
 				{Name: "reasoning_effort", Type: "enum", Default: defaults.DefaultReasoningEffort, EnumValues: []string{"low", "medium", "high"}, Description: "Default reasoning effort for agy sessions (low, medium, high). Empty uses the per-model default."},
 				{Name: "limits_tracking", Type: "boolean", Default: defaults.LimitsTracking, Description: "Track Antigravity usage limits via agy /usage (default: true)."},

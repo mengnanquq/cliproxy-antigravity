@@ -211,6 +211,16 @@ When client applications (like Cline, RooCode, or Cursor) provide OpenAI `tools[
 
 The client application can execute the function and pass the result back with `role: "tool"`.
 
+The tool contract is placed at the **start** of the forwarded prompt, because `agy` truncates oversized inline prompts from the tail.
+
+#### Large conversations
+
+`agy` caps the inline prompt it accepts on stdin (around 190KB) and truncates everything past the cap, which used to drop both the client tool contract and the newest user turn. When a request is larger than `max_prompt_bytes` (default `180224`), the plugin writes the full prompt to `<workdir>/.cliproxy_prompts/prompt_<hash>.txt`, sends a short instruction instead, and `agy` reads the file in full with its own file tooling (files are removed once the turn finishes). Context therefore reaches the model untruncated, up to the model's real context window.
+
+#### Long-running turns
+
+`agy` can stay silent for tens of seconds before the first token of a large turn. Intermediary proxies commonly drop connections that are idle for about 30 seconds, so streaming responses emit a valid empty-delta chunk every 10 seconds until real output arrives. Non-streaming clients need `nonstream-keepalive-interval` on the CLIProxyAPI side to survive the same idle window.
+
 ### Conversation Resumption
 
 On `/v1/chat/completions`, save the `conversation_id` returned in the JSON response or in the final stream chunk. Pass it back in the JSON body or via `X-AGY-Conversation-ID` to resume on the same account:
@@ -295,6 +305,7 @@ The prompt is piped directly to `agy`'s standard input rather than passed as a c
 | `limits_refresh_interval` | `1m` | How long cached limits stay fresh (minimum `10s`). Limits are also refreshed after any quota error. |
 | `enforce_limits` | `false` | Reject requests with HTTP 429 (`agy_quota_exhausted`, retryable) when the model's quota group is known to be exhausted, without starting `agy`. Off by default because paid plans may continue on AI credits after a limit is reached. |
 | `accounts_dir` | empty | Directory holding one agy home per account. Accounts added from the panel go here (`~/.agy-accounts` when empty). See [Multiple accounts](#multiple-accounts). |
+| `max_prompt_bytes` | `180224` | Largest request sent inline on `agy` stdin. Anything larger is written to `<workdir>/.cliproxy_prompts/` and `agy` is told to read it in full, so the conversation is never truncated. |
 
 ### Usage limits
 

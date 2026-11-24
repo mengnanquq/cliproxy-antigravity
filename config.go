@@ -24,6 +24,10 @@ type pluginConfig struct {
 	LimitsRefreshInterval      string
 	EnforceLimits              bool
 	AccountsDir                string
+	// MaxPromptBytes is the largest prompt sent inline on agy stdin. Larger
+	// requests are written to a file in workdir and handed to agy to read, so
+	// the conversation is never truncated.
+	MaxPromptBytes int
 	// AccountHome is the HOME given to agy for the account selected by CLIProxyAPI.
 	// It comes from the "home" field of the agy auth file, never from the plugin YAML.
 	AccountHome string
@@ -35,6 +39,7 @@ func defaultConfig() pluginConfig {
 		PrintTimeout:          "30m",
 		LimitsTracking:        true,
 		LimitsRefreshInterval: "1m",
+		MaxPromptBytes:        defaultMaxPromptBytes,
 	}
 }
 
@@ -349,6 +354,12 @@ func parsePluginConfig(raw []byte) (pluginConfig, error) {
 				return pluginConfig{}, fmt.Errorf("line %d: invalid accounts_dir: %w", lineNo+1, err)
 			}
 			cfg.AccountsDir = cleaned
+		case "max_prompt_bytes":
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed < 16*1024 {
+				return pluginConfig{}, fmt.Errorf("line %d: invalid max_prompt_bytes %q: must be an integer >= 16384", lineNo+1, value)
+			}
+			cfg.MaxPromptBytes = parsed
 		}
 	}
 

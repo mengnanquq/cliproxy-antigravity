@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -957,6 +958,8 @@ type agyExecution struct {
 	opts    agyOptions
 	prompt  string
 	session conversationRef
+	// cleanup removes the request file written for oversized prompts.
+	cleanup func()
 }
 
 func prepareAgyExecution(req rpcExecutorRequest) (agyExecution, error) {
@@ -985,13 +988,28 @@ func prepareAgyExecution(req rpcExecutorRequest) (agyExecution, error) {
 	if err != nil {
 		return agyExecution{}, err
 	}
-	return agyExecution{cfg: cfg, opts: opts, prompt: prompt, session: session}, nil
+	run := agyExecution{cfg: cfg, opts: opts, prompt: prompt, session: session}
+	// agy caps the inline stdin prompt (about 190KB) and truncates the tail, which
+	// used to drop the client tool contract and the newest user turn. Hand the
+	// full request to agy as a file instead, so nothing is lost.
+	if budget := promptBudgetBytes(cfg); len(prompt) > budget {
+		path, writeErr := writePromptFile(cfg.Workdir, prompt)
+		if writeErr != nil {
+			return agyExecution{}, pError(errorCodeRequestScoped, "failed to stage oversized prompt: "+writeErr.Error(), http.StatusInternalServerError)
+		}
+		run.prompt = fileHandoffPrompt(path, len(prompt))
+		run.cleanup = func() { _ = os.Remove(path) }
+	}
+	return run, nil
 }
 
 func executeNonStream(req rpcExecutorRequest) (executorResponse, error) {
 	run, err := prepareAgyExecution(req)
 	if err != nil {
 		return executorResponse{}, err
+	}
+	if run.cleanup != nil {
+		defer run.cleanup()
 	}
 	cfg, opts := run.cfg, run.opts
 	if err := checkModelLimits(cfg, opts.NativeModel); err != nil {
@@ -1024,6 +1042,9 @@ func executeNonStream(req rpcExecutorRequest) (executorResponse, error) {
 }
 
 func executeStream(req rpcExecutorRequest, run agyExecution) {
+	if run.cleanup != nil {
+		defer run.cleanup()
+	}
 	streamID := req.StreamID
 	cfg, opts := run.cfg, run.opts
 
@@ -1066,7 +1087,10 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 	// The OpenAI HTTP handlers frame plain JSON chunks and send [DONE].
 	// Other entrypoints may translate these chunks as SSE, so keep that framing.
 	rawChunks := path == "/v1/chat/completions" || path == "/v1/completions"
+	var emitMu sync.Mutex
 	sendChunk := func(delta map[string]any, finish *string, usage map[string]any) error {
+		emitMu.Lock()
+		defer emitMu.Unlock()
 		chunk := makeChatChunk(completionID, created, model, delta, finish, usage, conversationID)
 		if !rawChunks {
 			chunk = append(append([]byte("data: "), chunk...), '\n', '\n')
@@ -1089,6 +1113,30 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 		}
 		return sendChunk(delta, finish, usage)
 	}
+
+	// agy can stay silent for tens of seconds on large prompts (it may read a staged
+	// request file first). Intermediary proxies drop connections that stay idle for
+	// ~30s, so keep sending valid empty-delta chunks until real output arrives.
+	keepaliveStop := make(chan struct{})
+	var keepaliveOnce sync.Once
+	stopKeepalive := func() { keepaliveOnce.Do(func() { close(keepaliveStop) }) }
+	defer stopKeepalive()
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-keepaliveStop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := emit(map[string]any{}, nil, nil); err != nil {
+					return
+				}
+			}
+		}
+	}()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)

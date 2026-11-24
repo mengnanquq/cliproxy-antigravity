@@ -221,3 +221,60 @@ func TestMakeChatUsageChunkHasEmptyChoices(t *testing.T) {
 		t.Fatalf("unexpected usage chunk: %s", raw)
 	}
 }
+
+func TestBuildPromptPutsToolInstructionBeforeMessages(t *testing.T) {
+	payload := []byte(`{
+      "model":"agy/default",
+      "messages":[{"role":"user","content":"Hello"}],
+      "tools":[{"type":"function","function":{"name":"bash","description":"Run commands"}}]
+    }`)
+
+	prompt, err := testChatPrompt(t, payload, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolIdx := strings.Index(prompt, "[SYSTEM INSTRUCTION: CLIENT-SIDE TOOL CALLING]")
+	msgIdx := strings.Index(prompt, "--- message 1")
+	if toolIdx < 0 || msgIdx < 0 {
+		t.Fatalf("prompt is missing the tool instruction or the first message:\n%s", prompt[:200])
+	}
+	if toolIdx > msgIdx {
+		t.Fatalf("tool instruction must precede the conversation so tail truncation cannot drop it")
+	}
+}
+
+func TestWritePromptFileAndHandoff(t *testing.T) {
+	dir := t.TempDir()
+	big := strings.Repeat("conversation line\n", 20000) // ~340KB
+	path, err := writePromptFile(dir, big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat.Size() != int64(len(big)) {
+		t.Fatalf("staged prompt size = %d, want %d", stat.Size(), len(big))
+	}
+	if !strings.Contains(path, ".cliproxy_prompts") {
+		t.Fatalf("staged prompt path %q is not under .cliproxy_prompts", path)
+	}
+
+	wrapper := fileHandoffPrompt(path, len(big))
+	if !strings.Contains(wrapper, path) {
+		t.Fatalf("handoff prompt does not name the staged file: %s", wrapper)
+	}
+	if len(wrapper) > 4096 {
+		t.Fatalf("handoff prompt is %d bytes, expected a small inline prompt", len(wrapper))
+	}
+}
+
+func TestPromptBudgetDefault(t *testing.T) {
+	if got := promptBudgetBytes(pluginConfig{}); got != defaultMaxPromptBytes {
+		t.Fatalf("promptBudgetBytes() = %d, want %d", got, defaultMaxPromptBytes)
+	}
+	if got := promptBudgetBytes(pluginConfig{MaxPromptBytes: 32768}); got != 32768 {
+		t.Fatalf("promptBudgetBytes(override) = %d, want 32768", got)
+	}
+}

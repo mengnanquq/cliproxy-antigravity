@@ -4,6 +4,21 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-25
+
+### Fixed
+
+- Tool calls no longer disappear on long conversations. `agy` truncates inline prompts past roughly 190KB from the tail, which used to cut the `[SYSTEM INSTRUCTION: CLIENT-SIDE TOOL CALLING]` contract and the newest user turn, leaving the model to answer that it has no tool access. Requests above `max_prompt_bytes` (default `180224`) are now written to `<workdir>/.cliproxy_prompts/` and read in full by `agy`, so the conversation is forwarded untruncated. Staged prompt files are removed when the turn ends.
+- Streaming responses emit a valid empty-delta chunk every 10 seconds while `agy` is still working, so proxies that drop connections idle for ~30 seconds no longer abort large turns.
+
+### Added
+
+- `max_prompt_bytes` plugin setting (and panel field) to tune the inline prompt budget, minimum `16384`.
+
+### Changed
+
+- The client-tools contract is now placed at the start of the forwarded prompt instead of the end, so tail truncation can never remove it. The bridge preamble allows reading the single request file when one is staged.
+
 ## [0.4.0] - 2026-11-23
 
 ### Added
