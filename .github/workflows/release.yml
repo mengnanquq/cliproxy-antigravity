@@ -33,30 +33,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            ext: so
-          - os: ubuntu-latest
-            goos: linux
-            goarch: arm64
-            ext: so
-            cc: aarch64-linux-gnu-gcc
-            extra_apt: gcc-aarch64-linux-gnu
-          - os: macos-latest
-            goos: darwin
-            goarch: arm64
-            ext: dylib
-          - os: macos-latest
-            goos: darwin
-            goarch: amd64
-            ext: dylib
-          - os: ubuntu-latest
-            goos: windows
-            goarch: amd64
-            ext: dll
-            cc: x86_64-w64-mingw32-gcc
-            extra_apt: gcc-mingw-w64-x86-64
+        - os: ubuntu-latest
+          goos: linux
+          goarch: amd64
+          ext: so
+        - os: ubuntu-latest
+          goos: linux
+          goarch: arm64
+          ext: so
+          cc: aarch64-linux-gnu-gcc
+          extra_apt: gcc-aarch64-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
