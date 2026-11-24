@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -353,4 +355,67 @@ func TestRouteModel(t *testing.T) {
 			t.Errorf("routeModel(%q, %v) = %+v, want handled=%v", tc.model, tc.providers, resp, tc.want)
 		}
 	}
+}
+
+func TestModelCacheRoundTripAndFallback(t *testing.T) {
+	dir := t.TempDir()
+	cfg := pluginConfig{BinaryPath: "agy", Workdir: dir}
+	models := []modelInfo{{ID: "agy/gemini-4-neon", Name: "Neon"}, {ID: "agy/default", Name: "Default"}}
+	mapping := map[string]string{"agy/gemini-4-neon": "gemini-4-neon"}
+	saveModelCache(cfg, models, mapping)
+
+	gotModels, gotMapping := loadModelCache(cfg)
+	if len(gotModels) != 2 || gotModels[0].ID != "agy/gemini-4-neon" {
+		t.Fatalf("cached models = %+v", gotModels)
+	}
+	if gotMapping["agy/gemini-4-neon"] != "gemini-4-neon" {
+		t.Fatalf("cached mapping = %+v", gotMapping)
+	}
+
+	// A different binary invalidates the cache.
+	if other, _ := loadModelCache(pluginConfig{BinaryPath: "other-agy", Workdir: dir}); other != nil {
+		t.Fatalf("cache should not apply to another binary: %+v", other)
+	}
+}
+
+func TestMergeModelsPrefersPrimary(t *testing.T) {
+	primary := []modelInfo{{ID: "agy/default", Name: "fresh"}}
+	extra := []modelInfo{{ID: "agy/default", Name: "stale"}, {ID: "agy/gemini-4-neon", Name: "cached"}}
+	merged := mergeModels(primary, extra)
+	if len(merged) != 2 {
+		t.Fatalf("merged = %+v", merged)
+	}
+	if merged[0].Name != "fresh" {
+		t.Fatalf("primary entry was shadowed: %+v", merged[0])
+	}
+	mapping := mergeModelMapping(map[string]string{"agy/default": ""}, map[string]string{"agy/default": "x", "agy/other": "y"})
+	if mapping["agy/default"] != "" || mapping["agy/other"] != "y" {
+		t.Fatalf("mergeModelMapping = %+v", mapping)
+	}
+}
+
+// A rate-limited account makes `agy models` fail; the catalog must not lose the
+// discovered models, otherwise every agy/* request 400s on an unknown model.
+func TestDiscoverModelsFallsBackToCachedCatalog(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "agy")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := pluginConfig{BinaryPath: bin, Workdir: dir}
+	saveModelCache(cfg, []modelInfo{{ID: "agy/gemini-4-neon", Name: "Neon"}},
+		map[string]string{"agy/gemini-4-neon": "gemini-4-neon"})
+
+	invalidateModels()
+	models := discoverModels(cfg)
+	found := false
+	for _, model := range models {
+		if model.ID == "agy/gemini-4-neon" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("cached model missing after a failed discovery: %+v", models)
+	}
+	invalidateModels()
 }

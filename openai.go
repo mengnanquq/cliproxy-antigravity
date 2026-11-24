@@ -206,15 +206,35 @@ func promptBudgetBytes(cfg pluginConfig) int {
 // writePromptFile stores an oversized prompt where agy can read it with its own
 // file tooling, which is not capped like the inline prompt.
 func writePromptFile(workdir, prompt string) (string, error) {
-	dir := filepath.Join(os.TempDir(), "cliproxy_prompts")
+	dirs := []string{filepath.Join(os.TempDir(), "cliproxy_prompts")}
 	if workdir != "" {
-		dir = filepath.Join(workdir, ".cliproxy_prompts")
+		dirs = append([]string{filepath.Join(workdir, ".cliproxy_prompts")}, dirs...)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+	var dir string
+	var lastErr error
+	for _, candidate := range dirs {
+		if mkErr := os.MkdirAll(candidate, 0o700); mkErr == nil {
+			dir = candidate
+			break
+		} else {
+			lastErr = mkErr
+		}
+	}
+	if dir == "" {
+		return "", lastErr
+	}
+	// Staged prompts are removed after their turn; sweep leftovers from crashed
+	// turns so the workdir does not grow without bound.
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, entry := range entries {
+			if info, statErr := entry.Info(); statErr == nil && time.Since(info.ModTime()) > time.Hour {
+				_ = os.Remove(filepath.Join(dir, entry.Name()))
+			}
+		}
 	}
 	sum := sha256.Sum256([]byte(prompt))
-	path := filepath.Join(dir, "prompt_"+hex.EncodeToString(sum[:8])+".txt")
+	name := "prompt_" + hex.EncodeToString(sum[:8]) + "_" + newCallID() + ".txt"
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(prompt), 0o600); err != nil {
 		return "", err
 	}
@@ -490,13 +510,40 @@ func normalizeToolCalls(calls []openAIToolCall, declared []string) []openAIToolC
 	return calls
 }
 
+// normalizeArguments renders tool arguments as the JSON text clients expect. Some
+// models double-encode them as a JSON string ("{\"command\":\"ls\"}"), which
+// makes clients parse a string instead of an object and fail the call.
+func normalizeArguments(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return "{}"
+	}
+	if strings.HasPrefix(trimmed, "\"") {
+		var inner string
+		if err := json.Unmarshal(raw, &inner); err == nil {
+			unquoted := strings.TrimSpace(inner)
+			if unquoted == "" {
+				return "{}"
+			}
+			if json.Valid([]byte(unquoted)) {
+				return unquoted
+			}
+		}
+	}
+	return trimmed
+}
+
 func extractToolCalls(response string) ([]openAIToolCall, bool) {
 	trimmed := strings.TrimSpace(response)
 	jsonBlock := fencedToolCallJSON(trimmed)
 
 	if jsonBlock == "" {
 		if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
-			jsonBlock = trimmed
+			if end := jsonValueEnd(trimmed, 0); end > 0 {
+				jsonBlock = strings.TrimSpace(trimmed[:end])
+			} else {
+				jsonBlock = trimmed
+			}
 		}
 	}
 
@@ -523,10 +570,7 @@ func extractToolCalls(response string) ([]openAIToolCall, bool) {
 		if strings.TrimSpace(c.Name) == "" {
 			continue
 		}
-		args := string(c.Arguments)
-		if strings.TrimSpace(args) == "" || args == "null" {
-			args = "{}"
-		}
+		args := normalizeArguments(c.Arguments)
 		calls = append(calls, openAIToolCall{
 			Index: i,
 			ID:    fmt.Sprintf("call_%s_%d", newCallID(), i),

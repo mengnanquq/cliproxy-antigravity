@@ -6,8 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testChatPrompt(t *testing.T, payload []byte, nativeID, workdir string) (string, error) {
@@ -360,5 +362,78 @@ func TestToolInstructionListsExactNames(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "never a paraphrase") || !strings.Contains(prompt, "subagent") {
 		t.Fatalf("tool instruction does not pin exact names:\n%s", prompt[:400])
+	}
+}
+
+func TestExtractToolCallsUnquotesStringArguments(t *testing.T) {
+	calls, ok := extractToolCalls("```tool_calls\n[{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}]\n```")
+	if !ok || len(calls) != 1 {
+		t.Fatalf("ok=%v len=%d", ok, len(calls))
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &args); err != nil {
+		t.Fatalf("arguments are not a JSON object: %v (raw=%s)", err, calls[0].Function.Arguments)
+	}
+	if args["command"] != "ls" {
+		t.Fatalf("command = %v, want ls", args["command"])
+	}
+}
+
+func TestNormalizeArgumentsKeepsPlainObject(t *testing.T) {
+	if got := normalizeArguments(json.RawMessage(`{"command":"ls"}`)); got != `{"command":"ls"}` {
+		t.Fatalf("got %q", got)
+	}
+	if got := normalizeArguments(nil); got != "{}" {
+		t.Fatalf("nil arguments = %q, want {}", got)
+	}
+	if got := normalizeArguments(json.RawMessage(`"not json"`)); got != `"not json"` {
+		t.Fatalf("non-JSON string should be left alone, got %q", got)
+	}
+}
+
+func TestExtractToolCallsUnfencedWithTrailingProse(t *testing.T) {
+	calls, ok := extractToolCalls("[{\"name\":\"bash\",\"arguments\":{\"command\":\"ls\"}}]\n\n以上是调用。")
+	if !ok || len(calls) != 1 {
+		t.Fatalf("unfenced call with trailing prose was not recovered: ok=%v len=%d", ok, len(calls))
+	}
+	if calls[0].Function.Name != "bash" {
+		t.Fatalf("name = %q", calls[0].Function.Name)
+	}
+}
+
+func TestWritePromptFilePrunesStaleStages(t *testing.T) {
+	dir := t.TempDir()
+	stageDir := filepath.Join(dir, ".cliproxy_prompts")
+	if err := os.MkdirAll(stageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(stageDir, "prompt_old.txt")
+	if err := os.WriteFile(stale, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writePromptFile(dir, "fresh prompt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale staged prompt was not pruned: %v", err)
+	}
+}
+
+func TestWritePromptFileUsesUniqueNames(t *testing.T) {
+	dir := t.TempDir()
+	first, err := writePromptFile(dir, "same payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := writePromptFile(dir, "same payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("identical prompts share a staged file: %s", first)
 	}
 }

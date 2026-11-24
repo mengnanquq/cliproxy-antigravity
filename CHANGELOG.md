@@ -4,6 +4,17 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-25
+
+### Fixed
+
+- Tool arguments are no longer double-encoded. When a model emits `"arguments": "{\"command\":\"ls\"}"`, clients received a JSON string instead of an object and the call failed; arguments are now unquoted and validated.
+- A bare JSON tool-call payload followed by prose is recovered instead of degrading to text.
+- The streaming keepalive can no longer land a chunk after the terminal `finish_reason` frame.
+- Staged request files get a unique name per request, so two identical oversized requests cannot delete each other's file. Staging falls back to the temp directory when `workdir` is read-only, and leftovers older than an hour are swept.
+- Model discovery no longer shrinks the catalog when `agy models` fails (rate limit, timeout, transient network). The previous catalog and a cached copy on disk keep `agy/*` requestable.
+- The stream scanner accepts NDJSON lines up to 32MB, so very large tool-call payloads are not dropped.
+
 ## [0.4.4] - 2026-11-25
 
 ### Fixed

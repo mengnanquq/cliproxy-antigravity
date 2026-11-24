@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -107,6 +108,16 @@ type catalogState struct {
 	nativeByID map[string]string
 }
 
+// modelCatalogCache is the last discovery that worked. `agy models` fails while
+// an account is rate limited or the network hiccups, and publishing a catalog
+// without the discovered models makes every agy/* request fail with an unknown
+// model, so a failed refresh falls back to this.
+type modelCatalogCache struct {
+	BinaryPath string            `json:"binary_path"`
+	Models     []modelInfo       `json:"models"`
+	NativeByID map[string]string `json:"native_by_id"`
+}
+
 var modelCatalog = catalogState{}
 
 func invalidateModels() {
@@ -173,6 +184,69 @@ func standardBuiltinModels() []modelInfo {
 	}
 }
 
+func modelCachePath(cfg pluginConfig) string {
+	dir := filepath.Join(os.TempDir(), "cliproxy_antigravity")
+	if cfg.Workdir != "" {
+		dir = filepath.Join(cfg.Workdir, ".cliproxy_cache")
+	}
+	return filepath.Join(dir, "models.json")
+}
+
+func saveModelCache(cfg pluginConfig, models []modelInfo, nativeByID map[string]string) {
+	path := modelCachePath(cfg)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	payload, err := json.Marshal(modelCatalogCache{BinaryPath: cfg.BinaryPath, Models: models, NativeByID: nativeByID})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, payload, 0o600)
+}
+
+func loadModelCache(cfg pluginConfig) ([]modelInfo, map[string]string) {
+	payload, err := os.ReadFile(modelCachePath(cfg))
+	if err != nil {
+		return nil, nil
+	}
+	var cached modelCatalogCache
+	if err := json.Unmarshal(payload, &cached); err != nil {
+		return nil, nil
+	}
+	if cached.BinaryPath != cfg.BinaryPath || len(cached.Models) == 0 {
+		return nil, nil
+	}
+	return cached.Models, cached.NativeByID
+}
+
+// mergeModels keeps the first model for each ID so a stale cache cannot shadow a
+// freshly discovered entry.
+func mergeModels(primary, extra []modelInfo) []modelInfo {
+	seen := make(map[string]struct{}, len(primary))
+	merged := make([]modelInfo, 0, len(primary)+len(extra))
+	for _, group := range [][]modelInfo{primary, extra} {
+		for _, model := range group {
+			if _, ok := seen[model.ID]; ok {
+				continue
+			}
+			seen[model.ID] = struct{}{}
+			merged = append(merged, model)
+		}
+	}
+	return merged
+}
+
+func mergeModelMapping(primary, extra map[string]string) map[string]string {
+	merged := make(map[string]string, len(primary)+len(extra))
+	for key, value := range extra {
+		merged[key] = value
+	}
+	for key, value := range primary {
+		merged[key] = value
+	}
+	return merged
+}
+
 func discoverModels(cfg pluginConfig) []modelInfo {
 	modelCatalog.Lock()
 	defer modelCatalog.Unlock()
@@ -180,6 +254,11 @@ func discoverModels(cfg pluginConfig) []modelInfo {
 	if modelCatalog.binaryPath == cfg.BinaryPath && time.Since(modelCatalog.fetchedAt) < time.Minute && len(modelCatalog.models) > 0 {
 		return cloneModels(modelCatalog.models)
 	}
+
+	// Keep the previous successful catalog in case this refresh fails.
+	previousModels := cloneModels(modelCatalog.models)
+	previousMapping := modelCatalog.nativeByID
+	previousCompatible := modelCatalog.binaryPath == cfg.BinaryPath
 
 	builtin := standardBuiltinModels()
 	models := append([]modelInfo(nil), builtin...)
@@ -198,6 +277,7 @@ func discoverModels(cfg pluginConfig) []modelInfo {
 		"Gemini 3.8 Flash (Low)":          "gemini-3.8-flash-low",
 	}
 
+	discoveryOK := false
 	if err := validateBinaryPath(cfg.BinaryPath); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -216,6 +296,7 @@ func discoverModels(cfg pluginConfig) []modelInfo {
 			_ = cmd.Wait()
 			activeProcesses.remove(cmd)
 			discovered, mapping := parseAgyModelLines(stdout.String())
+			discoveryOK = len(discovered) > 0
 			for _, m := range discovered {
 				models = append(models, m)
 			}
@@ -234,6 +315,19 @@ func discoverModels(cfg pluginConfig) []modelInfo {
 					nativeByID["antigravity/"+baseSlug] = baseNative
 				}
 			}
+		}
+	}
+
+	if discoveryOK {
+		saveModelCache(cfg, models, nativeByID)
+	} else {
+		if previousCompatible && len(previousModels) > 0 {
+			models = mergeModels(models, previousModels)
+			nativeByID = mergeModelMapping(nativeByID, previousMapping)
+		}
+		if cachedModels, cachedMapping := loadModelCache(cfg); len(cachedModels) > 0 {
+			models = mergeModels(models, cachedModels)
+			nativeByID = mergeModelMapping(nativeByID, cachedMapping)
 		}
 	}
 
@@ -1139,7 +1233,7 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 	}()
 
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
 	var terminal *agyResult
 	var streamError string
 	var streamedText strings.Builder
@@ -1252,6 +1346,7 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 		return
 	}
 	if opts.HasTools && isToolCall {
+		stopKeepalive()
 		// Emit tool_calls delta chunk
 		_ = emit(map[string]any{
 			"tool_calls": toolCalls,
@@ -1267,6 +1362,7 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 		return
 	}
 
+	stopKeepalive()
 	// If it was buffered thinking it was a tool call but turned out not to be
 	if streamedText.Len() > emittedLen {
 		_ = emit(map[string]any{"content": streamedText.String()[emittedLen:]}, nil, nil)
