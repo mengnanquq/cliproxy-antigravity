@@ -112,7 +112,7 @@ func buildChatPrompt(req chatCompletionRequest, convID, workdir string) (string,
 	if convID == "" {
 		b.WriteString("You are answering a request forwarded through an OpenAI-compatible chat-completions bridge to the official Antigravity CLI.\n")
 		b.WriteString("Follow the system and developer instructions in the conversation below, then answer the latest user request. Return only the assistant response.\n")
-		b.WriteString("You have no filesystem, shell, network, or editor tools for this request: do not read files, run commands, or inspect the environment. Answer from the conversation text alone, and never leave the reply empty.\n\n")
+		b.WriteString("You have no shell, editor, or network tools for this request: do not modify files, run commands, or inspect the environment. If the caller points you at a request file, read only that file. Answer from the conversation text alone, and never leave the reply empty.\n\n")
 	}
 
 	// The client-tools contract goes first: agy caps the inline prompt and truncates
@@ -177,6 +177,66 @@ func writeToolInstruction(b *strings.Builder, tools []json.RawMessage) {
 	b.WriteString("```tool_calls\n[\n  {\n    \"name\": \"tool_name\",\n    \"arguments\": { ... }\n  }\n]\n```\n")
 	b.WriteString("If no tool call is needed, provide your regular assistant response without the ```tool_calls code block.\n")
 	b.WriteString("Do not execute local commands for client tools; the client application will run them and return the result.\n\n")
+}
+
+// defaultMaxPromptBytes keeps inline prompts below the Antigravity CLI cap
+// (observed around 190KB) so nothing has to be truncated before it is sent.
+const defaultMaxPromptBytes = 176 * 1024
+
+// promptBudgetBytes is the inline stdin budget. Anything larger is handed to agy
+// as a file so the full conversation reaches the model untruncated.
+func promptBudgetBytes(cfg pluginConfig) int {
+	if cfg.MaxPromptBytes > 0 {
+		return cfg.MaxPromptBytes
+	}
+	return defaultMaxPromptBytes
+}
+
+// writePromptFile stores an oversized prompt where agy can read it with its own
+// file tooling, which is not capped like the inline prompt.
+func writePromptFile(workdir, prompt string) (string, error) {
+	dirs := []string{filepath.Join(os.TempDir(), "cliproxy_prompts")}
+	if workdir != "" {
+		dirs = append([]string{filepath.Join(workdir, ".cliproxy_prompts")}, dirs...)
+	}
+	var dir string
+	var lastErr error
+	for _, candidate := range dirs {
+		if mkErr := os.MkdirAll(candidate, 0o700); mkErr == nil {
+			dir = candidate
+			break
+		} else {
+			lastErr = mkErr
+		}
+	}
+	if dir == "" {
+		return "", lastErr
+	}
+	// Staged prompts are removed after their turn; sweep leftovers from crashed
+	// turns so the workdir does not grow without bound.
+	if entries, readErr := os.ReadDir(dir); readErr == nil {
+		for _, entry := range entries {
+			if info, statErr := entry.Info(); statErr == nil && time.Since(info.ModTime()) > time.Hour {
+				_ = os.Remove(filepath.Join(dir, entry.Name()))
+			}
+		}
+	}
+	sum := sha256.Sum256([]byte(prompt))
+	name := "prompt_" + hex.EncodeToString(sum[:8]) + "_" + newCallID() + ".txt"
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(prompt), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// fileHandoffPrompt is the small inline prompt used with a written request file.
+func fileHandoffPrompt(path string, promptBytes int) string {
+	return fmt.Sprintf("READ THIS FIRST: this turn's complete client request (%d bytes) is stored in the file %s .\n"+
+		"Read that file in full before answering: use your file-reading tool with offset/limit and keep reading until you have consumed every line.\n"+
+		"The file begins with a [SYSTEM INSTRUCTION: CLIENT-SIDE TOOL CALLING] block that defines the client's tools, followed by the conversation transcript and the latest user request.\n"+
+		"Follow those instructions exactly: answer the latest user request, and when a client tool call is required reply ONLY with the fenced tool_calls JSON block described there.\n"+
+		"Do not modify files, run local commands, or inspect the machine beyond reading that file.\n", promptBytes, path)
 }
 
 func stageImage(dataURLOrPath string, workdir string) (string, error) {

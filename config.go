@@ -24,6 +24,13 @@ type pluginConfig struct {
 	LimitsRefreshInterval      string
 	EnforceLimits              bool
 	AccountsDir                string
+	// MaxPromptBytes caps the inline prompt; larger requests are staged to a file
+	// and read by agy, so the conversation is forwarded untruncated.
+	MaxPromptBytes int
+	// StreamKeepaliveSeconds emits an empty-delta chunk every N seconds while agy
+	// is silent (0 disables). Opt-in, minimum 15s: it commits the stream before
+	// real output, so startup errors lose the host's retry/rotation path.
+	StreamKeepaliveSeconds int
 	// AccountHome is the HOME given to agy for the account selected by CLIProxyAPI.
 	// It comes from the "home" field of the agy auth file, never from the plugin YAML.
 	AccountHome string
@@ -35,6 +42,7 @@ func defaultConfig() pluginConfig {
 		PrintTimeout:          "30m",
 		LimitsTracking:        true,
 		LimitsRefreshInterval: "1m",
+		MaxPromptBytes:        defaultMaxPromptBytes,
 	}
 }
 
@@ -343,6 +351,18 @@ func parsePluginConfig(raw []byte) (pluginConfig, error) {
 				return pluginConfig{}, fmt.Errorf("line %d: enforce_limits must be true or false", lineNo+1)
 			}
 			cfg.EnforceLimits = parsed
+		case "stream_keepalive_seconds":
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed < 0 || (parsed != 0 && parsed < 15) {
+				return pluginConfig{}, fmt.Errorf("line %d: invalid stream_keepalive_seconds %q: must be 0 or an integer >= 15", lineNo+1, value)
+			}
+			cfg.StreamKeepaliveSeconds = parsed
+		case "max_prompt_bytes":
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed < 16*1024 {
+				return pluginConfig{}, fmt.Errorf("line %d: invalid max_prompt_bytes %q: must be an integer >= 16384", lineNo+1, value)
+			}
+			cfg.MaxPromptBytes = parsed
 		case "accounts_dir":
 			cleaned, err := validateWorkdir(value)
 			if err != nil {

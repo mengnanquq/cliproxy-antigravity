@@ -11,7 +11,7 @@ import (
 const (
 	pluginID      = "cliproxy-antigravity"
 	providerID    = "agy"
-	pluginVersion = "0.5.1"
+	pluginVersion = "0.5.1-fork.1"
 	schemaVersion = 6
 )
 
@@ -493,6 +493,8 @@ func pluginRegistration() registration {
 				{Name: "limits_tracking", Type: "boolean", Default: defaults.LimitsTracking, Description: "Track Antigravity usage limits via agy /usage (default: true)."},
 				{Name: "limits_refresh_interval", Type: "string", Default: defaults.LimitsRefreshInterval, Description: "How long cached usage limits stay fresh, as a duration (default: 1m, minimum 10s)."},
 				{Name: "enforce_limits", Type: "boolean", Default: defaults.EnforceLimits, Description: "Reject requests with HTTP 429 when the quota group of the model is exhausted, without launching agy (default: false)."},
+				{Name: "stream_keepalive_seconds", Type: "integer", Default: defaults.StreamKeepaliveSeconds, Description: "Emit an empty-delta chunk every N seconds while agy is silent so proxies that drop ~30s idle connections keep streaming (0 disables, minimum 15)."},
+				{Name: "max_prompt_bytes", Type: "integer", Default: defaults.MaxPromptBytes, Description: "Largest prompt sent inline on agy stdin (default 180224). Larger requests are written to a file in workdir and read by agy in full, so the conversation is never truncated."},
 				{Name: "accounts_dir", Type: "string", Default: defaults.AccountsDir, Description: "Directory with one agy home per account. Accounts added from the panel are created here (default ~/.agy-accounts), and every signed-in home in it gets its own CLIProxyAPI auth file. CLIProxyAPI rotates between the accounts."},
 			},
 		},

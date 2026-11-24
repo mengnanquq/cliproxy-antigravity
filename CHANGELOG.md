@@ -4,6 +4,21 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+## [0.5.1-fork.1] - 2026-11-25
+
+Fork build on top of upstream v0.5.1. Everything from the upstream release is
+unchanged; this adds two opt-in features that upstream has not adopted yet
+(design discussion: adeebahmad01/cliproxy-antigravity#32).
+
+### Added
+
+- `max_prompt_bytes` (default `180224`): requests above the inline limit are staged to `<workdir>/.cliproxy_prompts/` and read in full by `agy`, so a conversation larger than the ~190 KB inline cap is forwarded untruncated instead of losing its newest turn. The staged file is removed when the turn ends, and files left by a crashed turn are swept after an hour.
+- `stream_keepalive_seconds` (default disabled, minimum `15`): emit a valid empty-delta chunk every N seconds while `agy` is silent, so intermediaries that drop ~30 s idle connections do not abort long turns. The ticker starts only after `agy` emits `init`, keeping the "no chunk before real output" invariant for startup errors; `stopKeepalive()` waits for the ticker goroutine and runs before any terminal frame.
+
+### Changed
+
+- Plugin metadata reports the fork version/repository so a rebuilt library is distinguishable from an upstream build.
+
 ## [0.5.1] - 2026-11-25
 
 ### Fixed

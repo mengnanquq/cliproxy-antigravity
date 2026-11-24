@@ -480,3 +480,50 @@ func TestToolInstructionPinsExactNames(t *testing.T) {
 		t.Fatalf("tool instruction does not pin exact names:\n%s", prompt[:400])
 	}
 }
+
+func TestWritePromptFileAndHandoff(t *testing.T) {
+	dir := t.TempDir()
+	big := strings.Repeat("conversation line\n", 20000) // ~340KB
+	path, err := writePromptFile(dir, big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat.Size() != int64(len(big)) {
+		t.Fatalf("staged prompt size = %d, want %d", stat.Size(), len(big))
+	}
+	if !strings.Contains(path, ".cliproxy_prompts") {
+		t.Fatalf("staged prompt %q is not under .cliproxy_prompts", path)
+	}
+	wrapper := fileHandoffPrompt(path, len(big))
+	if !strings.Contains(wrapper, path) || len(wrapper) > 4096 {
+		t.Fatalf("handoff prompt looks wrong (%d bytes): %s", len(wrapper), wrapper)
+	}
+}
+
+func TestWritePromptFileUsesUniqueNames(t *testing.T) {
+	dir := t.TempDir()
+	first, err := writePromptFile(dir, "same payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := writePromptFile(dir, "same payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("identical prompts share a staged file: %s", first)
+	}
+}
+
+func TestPromptBudgetDefault(t *testing.T) {
+	if got := promptBudgetBytes(pluginConfig{}); got != defaultMaxPromptBytes {
+		t.Fatalf("promptBudgetBytes() = %d, want %d", got, defaultMaxPromptBytes)
+	}
+	if got := promptBudgetBytes(pluginConfig{MaxPromptBytes: 32768}); got != 32768 {
+		t.Fatalf("promptBudgetBytes(override) = %d, want 32768", got)
+	}
+}

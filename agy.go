@@ -1127,6 +1127,8 @@ type agyExecution struct {
 	opts    agyOptions
 	prompt  string
 	session conversationRef
+	// cleanup removes the request file staged for an oversized prompt.
+	cleanup func()
 }
 
 func prepareAgyExecution(req rpcExecutorRequest) (agyExecution, error) {
@@ -1155,13 +1157,27 @@ func prepareAgyExecution(req rpcExecutorRequest) (agyExecution, error) {
 	if err != nil {
 		return agyExecution{}, err
 	}
-	return agyExecution{cfg: cfg, opts: opts, prompt: prompt, session: session}, nil
+	run := agyExecution{cfg: cfg, opts: opts, prompt: prompt, session: session}
+	// agy caps the inline stdin prompt (~190KB) and truncates the tail, which drops
+	// the newest user turn. Hand the full request to agy as a file instead.
+	if budget := promptBudgetBytes(cfg); len(prompt) > budget {
+		path, writeErr := writePromptFile(cfg.Workdir, prompt)
+		if writeErr != nil {
+			return agyExecution{}, pError(errorCodeRequestScoped, "failed to stage oversized prompt: "+writeErr.Error(), http.StatusInternalServerError)
+		}
+		run.prompt = fileHandoffPrompt(path, len(prompt))
+		run.cleanup = func() { _ = os.Remove(path) }
+	}
+	return run, nil
 }
 
 func executeNonStream(req rpcExecutorRequest) (executorResponse, error) {
 	run, err := prepareAgyExecution(req)
 	if err != nil {
 		return executorResponse{}, err
+	}
+	if run.cleanup != nil {
+		defer run.cleanup()
 	}
 	cfg, opts := run.cfg, run.opts
 	if err := checkModelLimits(cfg, opts.NativeModel); err != nil {
@@ -1194,6 +1210,9 @@ func executeNonStream(req rpcExecutorRequest) (executorResponse, error) {
 }
 
 func executeStream(req rpcExecutorRequest, run agyExecution) {
+	if run.cleanup != nil {
+		defer run.cleanup()
+	}
 	streamID := req.StreamID
 	cfg, opts := run.cfg, run.opts
 
@@ -1236,7 +1255,10 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 	// The OpenAI HTTP handlers frame plain JSON chunks and send [DONE].
 	// Other entrypoints may translate these chunks as SSE, so keep that framing.
 	rawChunks := path == "/v1/chat/completions" || path == "/v1/completions"
+	var emitMu sync.Mutex
 	sendChunk := func(delta map[string]any, finish *string, usage map[string]any) error {
+		emitMu.Lock()
+		defer emitMu.Unlock()
 		chunk := makeChatChunk(completionID, created, model, delta, finish, usage, conversationID)
 		if !rawChunks {
 			chunk = append(append([]byte("data: "), chunk...), '\n', '\n')
@@ -1244,6 +1266,8 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 		return emitPluginStreamChunk(streamID, chunk)
 	}
 	finishStream := func() {
+		emitMu.Lock()
+		defer emitMu.Unlock()
 		finishPluginStream(streamID, rawChunks, emitPluginStreamChunk, closePluginStream)
 	}
 	sentRole := false
@@ -1255,6 +1279,44 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 			sentRole = true
 		}
 		return sendChunk(delta, finish, usage)
+	}
+
+	// agy can stay silent for tens of seconds on a large prompt while it reads the
+	// staged file. Proxies drop connections that idle for ~30s, so an empty-delta
+	// chunk is emitted every few seconds. The ticker starts only after `init`: the
+	// stream must stay untouched until real output exists, otherwise startup errors
+	// (429, auth) can no longer fall back through the host's retry/account rotation.
+	var keepaliveOnce sync.Once
+	keepaliveStop := make(chan struct{})
+	var keepaliveWG sync.WaitGroup
+	stopKeepalive := func() {
+		keepaliveOnce.Do(func() { close(keepaliveStop) })
+		keepaliveWG.Wait()
+	}
+	defer stopKeepalive()
+	startKeepalive := func() {
+		interval := time.Duration(cfg.StreamKeepaliveSeconds) * time.Second
+		if interval <= 0 {
+			return
+		}
+		keepaliveWG.Add(1)
+		go func() {
+			defer keepaliveWG.Done()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-keepaliveStop:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := emit(map[string]any{}, nil, nil); err != nil {
+						return
+					}
+				}
+			}
+		}()
 	}
 
 	scanner := bufio.NewScanner(stdout)
@@ -1283,6 +1345,7 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 		switch event.Event {
 		case "init":
 			updateConversationID(event.ConversationID)
+			startKeepalive()
 		case "step_update":
 			if event.StepUpdate.StepType == "agent_response" && event.StepUpdate.TextDelta != "" {
 				streamedText.WriteString(event.StepUpdate.TextDelta)
@@ -1374,6 +1437,7 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 		closePluginStream(streamID, emptyResponseError())
 		return
 	}
+	stopKeepalive()
 	if opts.HasTools && isToolCall {
 		// Emit tool_calls delta chunk
 		if err := emit(map[string]any{

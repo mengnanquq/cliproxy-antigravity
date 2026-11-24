@@ -210,3 +210,19 @@ func TestResolveBinaryPathCandidateSearch(t *testing.T) {
 		t.Errorf("expected /usr/local/bin in search directories")
 	}
 }
+
+func TestParsePluginConfigPromptAndKeepalive(t *testing.T) {
+	cfg, err := parsePluginConfig([]byte("max_prompt_bytes: 131072\nstream_keepalive_seconds: 15\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxPromptBytes != 131072 || cfg.StreamKeepaliveSeconds != 15 {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	if _, err := parsePluginConfig([]byte("max_prompt_bytes: 1024\n")); err == nil {
+		t.Fatal("expected max_prompt_bytes below 16KB to be rejected")
+	}
+	if _, err := parsePluginConfig([]byte("stream_keepalive_seconds: 5\n")); err == nil {
+		t.Fatal("expected a keepalive interval below 15s to be rejected")
+	}
+}
