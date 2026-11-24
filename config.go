@@ -28,6 +28,10 @@ type pluginConfig struct {
 	// temp file that agy reads in full. Disabled by default: the cap it works
 	// around is agy-version dependent, so no number is assumed.
 	MaxPromptBytes int
+	// StreamKeepaliveSeconds emits an empty-delta chunk every N seconds while agy
+	// is silent (0 disables, minimum 15). The first chunk is emitted after one
+	// interval, which also covers agy's own start-up before it emits `init`.
+	StreamKeepaliveSeconds int
 	// AccountHome is the HOME given to agy for the account selected by CLIProxyAPI.
 	// It comes from the "home" field of the agy auth file, never from the plugin YAML.
 	AccountHome string
@@ -347,6 +351,12 @@ func parsePluginConfig(raw []byte) (pluginConfig, error) {
 				return pluginConfig{}, fmt.Errorf("line %d: enforce_limits must be true or false", lineNo+1)
 			}
 			cfg.EnforceLimits = parsed
+		case "stream_keepalive_seconds":
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed < 0 || (parsed != 0 && parsed < 15) {
+				return pluginConfig{}, fmt.Errorf("line %d: invalid stream_keepalive_seconds %q: must be 0 or an integer >= 15", lineNo+1, value)
+			}
+			cfg.StreamKeepaliveSeconds = parsed
 		case "max_prompt_bytes":
 			parsed, err := strconv.Atoi(value)
 			if err != nil || parsed < 16*1024 {

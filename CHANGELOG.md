@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented here.
 
+## [0.5.1-fork.2] - 2026-11-25
+
+Fork build on top of the `feat/prompt-staging` work (upstream PR #34) plus the
+stream keepalive upstream has not adopted yet.
+
+### Fixed
+
+- The streaming keepalive now starts with the `agy` process instead of waiting for
+  its `init` event. `agy` can spend more than the proxies' ~30 s idle window before
+  its first output when it has to read a staged request, which closed long turns
+  with `other side closed`. The trade-off is explicit: the first empty delta commits
+  the stream, so a start-up error arriving after one interval no longer falls back
+  through the host's retry/account rotation (fast errors such as 429 and auth
+  failures still do).
+
+### Changed
+
+- Prompt staging now matches upstream PR #34: a private per-turn directory under
+  `os.TempDir()/cliproxy-prompts`, `O_EXCL` file creation, platform-specific
+  privacy validation, cleanup on success/error/cancel, and
+  `agy_prompt_staged_bytes` / `X-AGY-Prompt-Staged` on the response.
+
 ## [Unreleased]
 
 ### Added

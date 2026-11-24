@@ -1291,6 +1291,41 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 		return sendChunk(delta, finish, usage)
 	}
 
+	// agy can stay silent for tens of seconds: it may read a staged request file
+	// before emitting anything, and proxies drop connections that idle for ~30s. The
+	// ticker therefore starts with the process, not with `init`. Trade-off worth
+	// knowing: the first empty delta commits the stream, so a start-up error that
+	// arrives after one interval can no longer fall back through the host's
+	// retry/account rotation. Errors that surface quickly (429, auth) still do.
+	var keepaliveOnce sync.Once
+	keepaliveStop := make(chan struct{})
+	var keepaliveWG sync.WaitGroup
+	stopKeepalive := func() {
+		keepaliveOnce.Do(func() { close(keepaliveStop) })
+		keepaliveWG.Wait()
+	}
+	defer stopKeepalive()
+	if interval := time.Duration(cfg.StreamKeepaliveSeconds) * time.Second; interval > 0 {
+		keepaliveWG.Add(1)
+		go func() {
+			defer keepaliveWG.Done()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-keepaliveStop:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := emit(map[string]any{}, nil, nil); err != nil {
+						return
+					}
+				}
+			}
+		}()
+	}
+
 	scanner := bufio.NewScanner(stdout)
 	// One NDJSON event carries a whole assistant turn, and a turn holding several
 	// large tool calls easily exceeds the 64KB default. 32MB keeps those events
@@ -1408,6 +1443,7 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 		closePluginStream(streamID, emptyResponseError())
 		return
 	}
+	stopKeepalive()
 	if opts.HasTools && isToolCall {
 		// Emit tool_calls delta chunk
 		if err := emit(map[string]any{
@@ -1433,6 +1469,7 @@ func executeStream(req rpcExecutorRequest, run agyExecution) {
 		return
 	}
 
+	stopKeepalive()
 	// If it was buffered thinking it was a tool call but turned out not to be
 	if streamedText.Len() > emittedLen {
 		if err := emit(map[string]any{"content": streamedText.String()[emittedLen:]}, nil, nil); err != nil {
